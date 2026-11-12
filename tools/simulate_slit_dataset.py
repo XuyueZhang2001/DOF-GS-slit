@@ -95,6 +95,15 @@ get the suffix _pf; they also contain focus_groups.json ({image: pose}), which
 the training uses to share one F per focus group (share_F: group) and one K
 over all images (share_K: global).
 
+Angle mode (--angle_mode, slit only): all (default) renders every pose at all
+n angles (n images per pose). cycle renders ONE image per pose and rotates the
+angle between poses: the i-th training pose (natural order of the pose names)
+gets angle i mod n, so the n angles are spread over the poses (scene tag _cyc).
+fixed renders one image per pose, all at --fixed_angle (scene tag _n1_a<a>_fix<deg>).
+With one image per pose, a slit dataset has as many images, and the same
+exposure per image, as the equal-area disk with one capture per pose; the
+per-pose theory (several angles per pose) does not apply and is not stored.
+
 Usage (from the repository root):
     # original design: 20 px x 2 px slit at maximal defocus
     python tools/simulate_slit_dataset.py --config ./config_files/config_real_cake.yaml \
@@ -108,6 +117,7 @@ import json
 import math
 import os
 import shutil
+import re
 import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -144,6 +154,11 @@ def parse_args():
     p.add_argument("--scene", required=True, help="source scene key in config_files/scene_info.yaml")
     p.add_argument("--iteration", type=int, required=True, help="iteration of the trained source model")
     p.add_argument("--n_angles", type=int, default=4, help="number of slit orientations per pose")
+    p.add_argument("--angle_mode", choices=["all", "cycle", "fixed"], default="all",
+                   help="(slit) all: every pose at all --n_angles angles (default); cycle: one image per pose, "
+                        "angle i mod n for the i-th pose (tag _cyc); fixed: one image per pose at --fixed_angle "
+                        "(tag _fix<deg>, n = 1)")
+    p.add_argument("--fixed_angle", type=float, default=0.0, help="(--angle_mode fixed) slit angle in degrees")
     p.add_argument("--full_circle", action="store_true",
                    help="spread angles over 360 deg instead of 180 deg (theta and theta+180 give identical PSFs)")
     p.add_argument("--max_blur_px", type=float, default=20.0,
@@ -223,6 +238,10 @@ def parse_args():
         p.error("--n_layers and --supersample must be >= 1")
     if not 0.0 <= a.focus_range[0] < a.focus_range[1] <= 1.0:
         p.error("--focus_range must satisfy 0 <= lo < hi <= 1")
+    if a.angle_mode != "all" and a.aperture != "slit":
+        p.error("--angle_mode cycle / fixed is for the slit aperture")
+    if a.angle_mode == "fixed" and a.optimal_ratio:
+        p.error("--optimal_ratio needs several angles; use --width_ratio with --angle_mode fixed")
     return a
 
 
@@ -232,6 +251,20 @@ PSF_SUFFIX = {"gaussian": "", "box": "_box", "gaussian_layered": "_glayer"}
 def psf_suffix(psf, diffraction):
     """Scene-name suffix of a PSF model (shared with tools/run_design_sweep.py)."""
     return PSF_SUFFIX[psf] + ("_diff" if diffraction else "")
+
+
+def angle_mode_suffix(angle_mode, fixed_angle=0.0):
+    """Scene-name tag of a one-image-per-pose slit dataset (shared with run_design_sweep)."""
+    if angle_mode == "cycle":
+        return "_cyc"
+    if angle_mode == "fixed":
+        return f"_fix{fixed_angle:g}"
+    return ""
+
+
+def natural_key(name):
+    """Sort key with numbers compared numerically ('2' before '10')."""
+    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", name)]
 
 
 def physical_aperture(a, aperture, K_L, K_W):
@@ -373,8 +406,12 @@ def main():
 
     # ---- aperture design (independent of the scene) ----
     fixed_area = a.match_area is not None or a.area_px2 is not None
-    angles = (evenly_spaced_angles(a.n_angles, a.full_circle) if a.aperture == "slit"
-              else [0.0] * a.disk_copies)
+    if a.aperture != "slit":
+        angles = [0.0] * a.disk_copies
+    elif a.angle_mode == "fixed":
+        angles = [float(a.fixed_angle)]
+    else:
+        angles = evenly_spaced_angles(a.n_angles, a.full_circle)
     if a.aperture == "slit":
         ratio = optimal_ratio(angles) if a.optimal_ratio else a.width_ratio
         if not 0.0 < ratio <= 1.0:
@@ -383,7 +420,8 @@ def main():
     prefix = "slitsim_" if a.aperture == "slit" else "disksim_"
     base = prefix + a.scene.replace("synthetic", "syn")
     if a.aperture == "slit" and (fixed_area or a.optimal_ratio):
-        base += f"_n{a.n_angles}_a{ratio:.2f}"      # design sweeps get distinct scene names
+        base += f"_n{len(angles)}_a{ratio:.2f}"     # design sweeps get distinct scene names
+    base += angle_mode_suffix(a.angle_mode, a.fixed_angle) if a.aperture == "slit" else ""
     if a.noise_std > 0 and a.exposure != 1.0:
         base += f"_e{a.exposure:.4g}_{a.noise_scaling}"
     if a.focus_mode == "per_pose":
@@ -466,9 +504,15 @@ def main():
         print(f"Ground truth (slit): n = {len(angles)}, ratio a = {ratio:.4f}"
               f"{' (optimal tan(%.2f deg))' % max_offset_deg(angles) if a.optimal_ratio else ''}, "
               f"K_L = {K_L:.2f}, K_W = {K_W:.2f}, max blur {max_blur:.2f} px x {max_blur * ratio:.2f} px")
-        th = theory_summary(ratio, angles)
-        print(f"Theory vs equal-area disk: worst-direction variance ratio {th['worst_var_ratio']:.3f}, "
-              f"DOF gain {th['dof_gain_worst']:.2f}x")
+        if a.angle_mode == "all":
+            th = theory_summary(ratio, angles)
+            print(f"Theory vs equal-area disk: worst-direction variance ratio {th['worst_var_ratio']:.3f}, "
+                  f"DOF gain {th['dof_gain_worst']:.2f}x")
+        else:
+            print(f"Angle mode {a.angle_mode}: one image per pose"
+                  + (f", angles {', '.join(f'{x:g}' for x in angles)} rotated between poses"
+                     if a.angle_mode == "cycle" else f", all at {angles[0]:g} deg")
+                  + " (per-pose theory not applicable)")
     else:
         K_L = 2.0 * math.sqrt(area_K / math.pi) if area_K is not None else a.max_blur_px / d_max
         K_W = K_L
@@ -558,20 +602,32 @@ def main():
         image_lines.append(f"{len(image_lines) + 1} {q[0]} {q[1]} {q[2]} {q[3]} {t[0]} {t[1]} {t[2]} "
                            f"{e.camera_id} {name}.png\n\n")
 
+    # (angle index, angle) of the captures of every training pose
+    pose_order = {stem: i for i, stem in enumerate(sorted((c.image_name for c in train_cams), key=natural_key))}
+
+    def pose_captures(stem):
+        if a.aperture == "slit" and a.angle_mode == "cycle":
+            k = pose_order[stem] % len(angles)
+            return [(k, angles[k])]
+        if a.aperture == "slit" and a.angle_mode == "fixed":
+            return [(0, angles[0])]
+        return list(enumerate(angles))
+
     with torch.no_grad():
         layer_blur_px = []
         for cam in train_cams:
             stem = cam.image_name
+            captures = pose_captures(stem)
             save(render_img(cam, 0.0, 0.0, 0.0), os.path.join(aif_dir, f"{stem}.png"), noisy=False)
             if layered:
                 # one layered rendering per pose for all distinct angles (disk copies share one image)
-                uniq = sorted(set(angles))
+                uniq = sorted(set(ang for _, ang in captures))
                 thetas = [math.radians(x + a.theta_bias_deg) for x in uniq]
                 imgs, info = psf_render.render_layered(cam, gaussians, render_aif_linear, focus_of[stem], thetas, kernel_fn,
                                                        a.n_layers, bg, tone_map=tone_map)
                 by_angle = dict(zip(uniq, imgs))
                 layer_blur_px.append(info["layer_step"] * K_L)
-            for k, ang in enumerate(angles):
+            for k, ang in captures:
                 name = f"{stem}_a{k:02d}"
                 theta = math.radians(ang + a.theta_bias_deg)
                 img = by_angle[ang] if layered else render_img(cam, K_L, K_W, theta, focus_of[stem])
@@ -612,13 +668,15 @@ def main():
         json.dump(focus_groups, f, indent=2)
     with open(os.path.join(out, "split.json"), "w") as f:
         json.dump({"test": test_names}, f, indent=2)
+    n_per_pose = len(pose_captures(train_cams[0].image_name)) if train_cams else len(angles)
     # focus_distance: reference focus (defines the aperture size; per-pose values in focus_per_group)
     gt = dict(aperture=a.aperture, source_scene=a.scene, source_iteration=a.iteration, focus_distance=F,
               K_long=K_L, K_short=K_W, width_ratio=K_W / K_L, angles_deg=angles,
               theta_bias_deg=a.theta_bias_deg if a.aperture == "slit" else 0.0,
               max_blur_px=max_blur, noise_std=a.noise_std,
               exposure=a.exposure, noise_scaling=a.noise_scaling, noise_std_effective=noise_eff,
-              images_per_pose=len(angles), total_exposure_per_pose=a.exposure * len(angles),
+              angle_mode=(a.angle_mode if a.aperture == "slit" else "all"),
+              images_per_pose=n_per_pose, total_exposure_per_pose=a.exposure * n_per_pose,
               psf=a.psf, n_layers=(a.n_layers if layered else None),
               supersample=(a.supersample if layered else None),
               layer_blur_px=([min(layer_blur_px), max(layer_blur_px)] if layer_blur_px else None),
@@ -633,7 +691,7 @@ def main():
               d_max_per_pose_max=(max(d_max_pose) if d_max_pose else d_max),
               max_blur_px_per_pose_max=K_L * (max(d_max_pose) if d_max_pose else d_max),
               ratio_is_optimal=(a.aperture == "slit" and a.optimal_ratio),
-              theory=(theory_summary(K_W / K_L, angles) if a.aperture == "slit" else None),
+              theory=(theory_summary(K_W / K_L, angles) if a.aperture == "slit" and a.angle_mode == "all" else None),
               n_train_poses=len(train_cams), n_test_poses=len(test_cams))
     with open(os.path.join(out, "sim_gt.json"), "w") as f:
         json.dump(gt, f, indent=2)
@@ -672,7 +730,7 @@ def main():
         with open("config_files/scene_info.yaml", "a") as f:
             f.write(f"\n{new_scene}:\n  source_path: {out}\n  holdout: 8\n")
 
-    print(f"\nWrote {len(train_cams) * len(angles)} {a.aperture} images ({len(train_cams)} poses x {len(angles)}) "
+    print(f"\nWrote {len(train_cams) * n_per_pose} {a.aperture} images ({len(train_cams)} poses x {n_per_pose}) "
           f"and {len(test_cams)} AIF test images to {out}")
     print(f"Config: {cfg_path}   (scene '{new_scene}' registered in config_files/scene_info.yaml)")
     print(f"Next:   python train.py --config {cfg_path}")

@@ -416,11 +416,15 @@ def main():
             w.writeheader()
             w.writerows(depth_rows)
     with open(os.path.join(out_dir, "summary.json"), "w") as f:
+        angle_mode = sim_gt.get("angle_mode", "all")   # one image per pose for cycle / fixed
         design = dict(aperture=sim_gt.get("aperture", "slit"), n_angles=len(set(sim_gt["angles_deg"])),
-                      width_ratio=sim_gt["width_ratio"], images_per_pose=len(sim_gt["angles_deg"]),
+                      width_ratio=sim_gt["width_ratio"], angle_mode=angle_mode,
+                      images_per_pose=sim_gt.get("images_per_pose", len(sim_gt["angles_deg"])),
                       group_by_pose=bool(getattr(conf, "slit_group_by_pose", False)),
                       iterations=int(getattr(conf, "iterations", a.iteration)), model_folder=conf.model_folder)
-        if design["aperture"] == "slit":
+        if design["aperture"] == "slit" and angle_mode != "all":
+            theory = None   # the per-pose theory assumes all angles at every pose
+        elif design["aperture"] == "slit":
             theory = sim_gt.get("theory") or theory_summary(sim_gt["width_ratio"], sim_gt["angles_deg"])
         else:
             theory = dict(worst_var_ratio=1.0, dof_gain_worst=1.0, mean_var_ratio=1.0, dof_gain_mean=1.0)

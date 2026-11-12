@@ -14,8 +14,11 @@
 # Focus (--focus_mode): per_pose (default, <sfx> = _pf): every pose focuses at its own
 # random depth (shared by its slit angles); training shares one F per pose and one K.
 # global: one focus for all poses (the earlier datasets, <sfx> empty).
-# Noise-free, Gaussian PSF (--psf gaussian). Finished steps are skipped, so the
-# script can be restarted. The source model iteration is the latest one found in
+# PSF of the captures (--psf): gaussian (default), gaussian_layered (<sfx> += _glayer)
+# or box (<sfx> += _box). Slit angles (--angle_mode): all (default, n images per pose)
+# or cycle (one image per pose, angle rotating between poses; slit datasets get _cyc
+# after the design, e.g. slitsim_<scene>_n4_a0.40_cyc_pf_glayer; the disk is unchanged).
+# Noise-free. Finished steps are skipped, so the script can be restarted. The source model iteration is the latest one found in
 # output/<model_version>/<model_folder>/<scene>/point_cloud (or --iteration).
 #
 # Usage (from the repository root, e.g. inside tmux):
@@ -23,6 +26,7 @@
 #   bash tools/run_all_scenes.sh --gpu 1 --stage train             # then train + evaluate
 #   bash tools/run_all_scenes.sh --gpu 0 --stage all real_caps real_cisco   # a subset on another GPU
 #   bash tools/run_all_scenes.sh --gpu 1 --focus_mode global        # the earlier global-focus setting
+#   bash tools/run_all_scenes.sh --gpu 1 --psf gaussian_layered --angle_mode cycle   # one slit image per pose
 # Stages: simulate (datasets + K check), train (train + evaluate, needs the datasets),
 #         all (both). Scenes whose simulation warns that K cannot be represented
 #         (K < 101) are not trained.
@@ -34,6 +38,8 @@ GPU=0
 STAGE=all
 ITER=""
 FOCUS=per_pose
+PSF=gaussian
+AMODE=all
 SCENES=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -41,13 +47,19 @@ while [ $# -gt 0 ]; do
         --stage) STAGE="$2"; shift 2 ;;
         --iteration) ITER="$2"; shift 2 ;;
         --focus_mode) FOCUS="$2"; shift 2 ;;
-        -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+        --psf) PSF="$2"; shift 2 ;;
+        --angle_mode) AMODE="$2"; shift 2 ;;
+        -h|--help) sed -n '2,34p' "$0"; exit 0 ;;
         *) SCENES+=("$1"); shift ;;
     esac
 done
 case "$STAGE" in simulate|train|all) ;; *) echo "--stage must be simulate, train or all"; exit 1 ;; esac
 case "$FOCUS" in per_pose) SFX=_pf ;; global) SFX="" ;; *) echo "--focus_mode must be per_pose or global"; exit 1 ;; esac
-echo "focus mode: $FOCUS (dataset suffix '${SFX}')"
+case "$PSF" in gaussian) ;; gaussian_layered) SFX="${SFX}_glayer" ;; box) SFX="${SFX}_box" ;;
+    *) echo "--psf must be gaussian, gaussian_layered or box"; exit 1 ;; esac
+case "$AMODE" in all) MTAG="" ;; cycle) MTAG="_cyc" ;; *) echo "--angle_mode must be all or cycle"; exit 1 ;; esac
+SWEEP_OPTS=(--focus_mode "$FOCUS" --psf "$PSF" --angle_mode "$AMODE")
+echo "focus mode: $FOCUS, psf: $PSF, angle mode: $AMODE (dataset suffix '${SFX}', slit tag '${MTAG}')"
 if [ ${#SCENES[@]} -eq 0 ]; then
     SCENES=(real_cake real_caps real_cisco real_coral real_cupcake real_cups real_daisy real_sausage real_seal real_tools)
 fi
@@ -70,7 +82,7 @@ print('./output/%s/%s/%s' % (c.get('model_version', 'model_dofgs'), c.model_fold
 has_k_warning() {
     local scene="$1"
     grep -qs "WARN\] K =" "$LOG_DIR/slitsim_${scene}_reference.log" \
-        "$LOG_DIR/slitsim_${scene}_n4_a0.40${SFX}_simulate.log" "$LOG_DIR/disksim_${scene}${SFX}_simulate.log"
+        "$LOG_DIR/slitsim_${scene}_n4_a0.40${MTAG}${SFX}_simulate.log" "$LOG_DIR/disksim_${scene}${SFX}_simulate.log"
 }
 
 for s in "${SCENES[@]}"; do
@@ -99,7 +111,7 @@ for s in "${SCENES[@]}"; do
             echo "[skip] reference dataset slitsim_${s} exists"
         fi
         python tools/run_design_sweep.py --config "$cfg" --scene "$s" --iteration "$it" --gpu "$GPU" \
-            --focus_mode "$FOCUS" --steps simulate || { FAILED+=("$s (simulate)"); continue; }
+            "${SWEEP_OPTS[@]}" --steps simulate || { FAILED+=("$s (simulate)"); continue; }
     fi
 
     if has_k_warning "$s"; then
@@ -109,15 +121,15 @@ for s in "${SCENES[@]}"; do
     [ "$STAGE" = "simulate" ] && continue
 
     # ---------------- train + evaluate ----------------
-    if [ ! -f "data/slit_sim/slitsim_${s}_n4_a0.40${SFX}/sim_gt.json" ] || [ ! -f "data/slit_sim/disksim_${s}${SFX}/sim_gt.json" ]; then
+    if [ ! -f "data/slit_sim/slitsim_${s}_n4_a0.40${MTAG}${SFX}/sim_gt.json" ] || [ ! -f "data/slit_sim/disksim_${s}${SFX}/sim_gt.json" ]; then
         echo "[skip] datasets of $s missing; run --stage simulate first"; SKIPPED+=("$s (no datasets)"); continue
     fi
     # slit (densmax+L_dir: code defaults) + disk
     python tools/run_design_sweep.py --config "$cfg" --scene "$s" --iteration "$it" --gpu "$GPU" \
-        --focus_mode "$FOCUS" || FAILED+=("$s (slit densmax+L_dir / disk)")
+        "${SWEEP_OPTS[@]}" || FAILED+=("$s (slit densmax+L_dir / disk)")
     # slit (original model)
     python tools/run_design_sweep.py --config "$cfg" --scene "$s" --iteration "$it" --gpu "$GPU" \
-        --focus_mode "$FOCUS" --no_disk --dir_loss 0 --densify_stat mean \
+        "${SWEEP_OPTS[@]}" --no_disk --dir_loss 0 --densify_stat mean \
         || FAILED+=("$s (slit original)")
 done
 
@@ -127,5 +139,6 @@ echo "================================ done ================================"
 [ ${#K_WARN[@]} -gt 0 ] && printf 'K below the representable range (not trained): %s\n' "${K_WARN[@]}"
 [ ${#FAILED[@]} -gt 0 ] && printf 'failed: %s\n' "${FAILED[@]}"
 if [ "$STAGE" != "simulate" ]; then
-    python tools/summarize_scenes.py --suffix "$SFX" --scenes "${SCENES[@]}"
+    python tools/summarize_scenes.py --suffix "$SFX" --slit_tag "$MTAG" --scenes "${SCENES[@]}" \
+        --out "./output/scene_summary${MTAG}${SFX}"
 fi

@@ -75,8 +75,11 @@ def load_rows(a):
                           images_per_pose=len(gt["angles_deg"]),
                           group_by_pose=bool(cfg.get("slit_group_by_pose", False)),
                           iterations=int(cfg.get("iterations", s["iteration"])), model_folder=model_folder)
+        angle_mode = gt.get("angle_mode", "all")   # cycle / fixed: one image per pose
         theory = s.get("theory")
-        if theory is None:
+        if angle_mode != "all":
+            theory = {}      # the per-pose theory does not apply
+        elif theory is None:
             theory = (theory_summary(gt["width_ratio"], gt["angles_deg"]) if aperture == "slit"
                       else dict(worst_var_ratio=1.0, dof_gain_worst=1.0))
         summ = s["summary"]
@@ -86,7 +89,9 @@ def load_rows(a):
             model_folder=model_folder, scene=s["scene"], iteration=s["iteration"], aperture=aperture,
             n=design["n_angles"] if aperture == "slit" else "-",
             a=round(design["width_ratio"], 3) if aperture == "slit" else "-",
-            images_per_pose=design["images_per_pose"],
+            images_per_pose=gt.get("images_per_pose", design["images_per_pose"]),
+            angle_mode=angle_mode if aperture == "slit" else "-",
+            focus=gt.get("focus_mode", "global"),
             train_mode="per_pose" if design.get("group_by_pose") else "per_view",
             dir_loss=dir_loss,
             psf=psf_label(gt),
@@ -96,7 +101,7 @@ def load_rows(a):
             noise_scaling=gt.get("noise_scaling", "shot"),
             noise_eff=gt.get("noise_std_effective", gt.get("noise_std", 0.0)),
             total_exposure=gt.get("total_exposure_per_pose",
-                                  gt.get("exposure", 1.0) * design["images_per_pose"]),
+                                  gt.get("exposure", 1.0) * gt.get("images_per_pose", design["images_per_pose"])),
             test_psnr=test.get("psnr"), test_ssim=test.get("ssim"),
             test_lpips=next((v for k, v in test.items() if k.startswith("lpips")), None),
             train_psnr=train.get("recovered", {}).get("psnr"),
@@ -125,6 +130,8 @@ def psf_label(gt):
 def same_capture_budget(d, r):
     """True if disk run d is a fair reference for run r (same PSF model, noise setting and total exposure)."""
     if d["psf"] != r["psf"]:
+        return False
+    if d.get("focus", "global") != r.get("focus", "global"):   # per-pose vs global focus datasets
         return False
     if d["noise"] != r["noise"]:
         return False
@@ -170,7 +177,8 @@ def fmt(v, nd=3):
 def write_table(rows, out_dir):
     for r in rows:
         r["captures"] = f"{r['images_per_pose']} x {r['exposure']:.4g}"
-    cols = [("run", None), ("aperture", "aperture"), ("n", "n"), ("a", "a"), ("train mode", "train_mode"),
+    cols = [("run", None), ("aperture", "aperture"), ("n", "n"), ("a", "a"), ("angles", "angle_mode"),
+            ("train mode", "train_mode"),
             ("λ_dir", "dir_loss"), ("PSF", "psf"), ("iter", "iteration"), ("noise σ", "noise"), ("captures/pose x exposure", "captures"),
             ("total exposure", "total_exposure"), ("σ_eff", "noise_eff"), ("test PSNR", "test_psnr"), ("test SSIM", "test_ssim"),
             ("test LPIPS", "test_lpips"), ("gain over input (dB)", "gain_over_input"),
@@ -197,7 +205,9 @@ def write_table(rows, out_dir):
 
 
 def plot(rows, out_dir, source_scene):
-    pts = [r for r in rows if r["delta_test_psnr_vs_disk"] is not None]
+    # runs without a per-pose theory (angle modes cycle / fixed) are listed in the table only
+    pts = [r for r in rows if r["delta_test_psnr_vs_disk"] is not None
+           and (r["aperture"] == "disk" or r["theory_dof_gain"] is not None)]
     if not pts:
         return None
     import matplotlib

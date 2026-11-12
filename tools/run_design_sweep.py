@@ -74,6 +74,17 @@ Focus of the simulated captures
                       one aperture scale (share_K: global). global: one focus for all
                       poses (the earlier datasets, unsuffixed names).
 
+Angle mode (slit)
+  --angle_mode all|cycle|fixed
+                      all (default): every pose at all n angles of a design (n images
+                      per pose). cycle: ONE image per pose, the angle rotating between
+                      poses (pose i gets angle i mod n; scene tag _cyc). fixed: one
+                      image per pose, all at --fixed_angle (default 0; the design's n
+                      is ignored, scene tag _n1_a<a>_fix<deg>). With one image per pose
+                      the slit has as many images, with the same exposure each, as the
+                      equal-area disk with one capture per pose. The disk is unchanged.
+  --no_slit           skip the slit designs (disk baseline only).
+
 PSF model (see tools/simulate_slit_dataset.py and tools/psf_render.py)
   --psf gaussian|box|gaussian_layered
                       PSF of the simulated captures; slit and disk use the same model.
@@ -95,6 +106,11 @@ Usage (from the repository root, e.g. inside tmux):
         --equal_total_exposure --noise_scaling read                     # slit 4 x 0.25 vs disk 1 x 1.0
     python tools/run_design_sweep.py --config ./config_files/config_real_cake.yaml \
         --scene real_cake --iteration 15000 --gpu 1 --no_disk --dir_loss 0.03 0.1 0.3
+    python tools/run_design_sweep.py --config ./config_files/config_real_cake.yaml \
+        --scene real_cake --iteration 15000 --gpu 1 --psf gaussian_layered --angle_mode cycle \
+        --no_disk --dir_loss 0 --densify_stat mean                     # one slit image per pose, orig model
+    python tools/run_design_sweep.py --config ./config_files/config_real_cake.yaml \
+        --scene real_cake --iteration 15000 --gpu 1 --psf gaussian_layered --no_slit   # disk only
 """
 import argparse
 import json
@@ -133,6 +149,11 @@ def parse_args():
                         "(default ./data/slit_sim/slitsim_<scene>)")
     p.add_argument("--designs", nargs="+", default=["4:0.4"], help="designs as n:a, e.g. 4:0.4 8:0.2")
     p.add_argument("--no_disk", action="store_true", help="skip the equal-area disk baseline")
+    p.add_argument("--no_slit", action="store_true", help="skip the slit designs (disk baseline only)")
+    p.add_argument("--angle_mode", choices=["all", "cycle", "fixed"], default="all",
+                   help="slit: all angles at every pose (default), one rotating angle per pose (cycle), "
+                        "or one fixed angle per pose (fixed)")
+    p.add_argument("--fixed_angle", type=float, default=0.0, help="(--angle_mode fixed) slit angle in degrees")
     p.add_argument("--disk_copies", type=int, default=None,
                    help="captures per pose for the disk baseline; default: the slit n when --noise_std > 0 "
                         "(equal number of captures), otherwise 1")
@@ -194,11 +215,18 @@ def parse_args():
             p.error(f"--{k} must be > 0")
     if a.noise_std == 0 and (a.equal_total_exposure or (a.slit_exposure or 1.0) != 1.0 or a.disk_exposure != 1.0):
         print("[WARN] exposure settings have no effect without noise (--noise_std 0); they are ignored.")
+    if a.no_slit and a.no_disk:
+        p.error("--no_slit and --no_disk leave nothing to run")
     return a
 
 
+def slit_shots_per_pose(a, n):
+    """Images per pose of a slit design with n angles (1 for --angle_mode cycle / fixed)."""
+    return n if a.angle_mode == "all" else 1
+
+
 def slit_exposure_for(a, n):
-    """Relative exposure of every capture of a slit design with n angles."""
+    """Relative exposure of every capture of a slit design with n images per pose."""
     if a.noise_std == 0:
         return 1.0
     if a.equal_total_exposure:
@@ -354,17 +382,26 @@ def main():
 
     # (scene name, simulate arguments, images per pose)
     jobs, slit_ns, slit_totals = [], [], []
-    for d in a.designs:
+    for d in ([] if a.no_slit else a.designs):
         n_str, r_str = d.split(":")
         n, r = int(n_str), float(r_str)
-        e = slit_exposure_for(a, n)
-        slit_ns.append(n)
-        slit_totals.append(n * e)
-        name = f"slitsim_{a.scene}_n{n}_a{r:.2f}{tag}{exposure_tag(a, e)}{ftag}{ptag}"
+        if a.angle_mode == "fixed":
+            n = 1                                   # a single angle (--fixed_angle)
+        shots = slit_shots_per_pose(a, n)
+        e = slit_exposure_for(a, shots)
+        slit_ns.append(shots)
+        slit_totals.append(shots * e)
+        mtag = {"all": "", "cycle": "_cyc", "fixed": f"_fix{a.fixed_angle:g}"}[a.angle_mode]
+        name = f"slitsim_{a.scene}_n{n}_a{r:.2f}{mtag}{tag}{exposure_tag(a, e)}{ftag}{ptag}"
         jobs.append((name, ["--n_angles", str(n), "--width_ratio", str(r), "--exposure", repr(e),
-                            "--noise_scaling", a.noise_scaling] + psf_args, n))
+                            "--noise_scaling", a.noise_scaling,
+                            "--angle_mode", a.angle_mode, "--fixed_angle", repr(a.fixed_angle)] + psf_args, shots))
+        if a.angle_mode != "all":
+            print(f"slit n={n}, a={r:g}: one image per pose ("
+                  + ("angle rotating between poses" if a.angle_mode == "cycle" else f"angle {a.fixed_angle:g} deg")
+                  + ")")
         if a.noise_std > 0:
-            print(f"slit n={n}, a={r:g}: {n} captures x exposure {e:.4g} (total {n * e:.4g} per pose)")
+            print(f"slit n={n}, a={r:g}: {shots} captures x exposure {e:.4g} (total {shots * e:.4g} per pose)")
     if not a.no_disk:
         copies = resolve_disk_copies(a, slit_ns)
         e_d = a.disk_exposure if a.noise_std > 0 else 1.0

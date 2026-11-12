@@ -9,7 +9,11 @@ For every source scene it reads the latest evaluation summary
     slit (orig)           <orig_folder>/slitsim_<scene>_<design><suffix>  default slit_sim (original model)
     disk                  <disk_folder>/disksim_<scene><suffix>           default slit_sim
 <suffix> is _pf for the per-pose-focus datasets (default) and empty for the
-earlier global-focus datasets (--suffix "").
+earlier global-focus datasets (--suffix ""); layered-PSF datasets add _glayer
+(--suffix _pf_glayer). --slit_tag adds the tag of one-image-per-pose slit
+datasets after the design (_cyc: --angle_mode cycle, so slitsim_<scene>_n4_a0.40_cyc_pf_glayer).
+--new_folder none / --orig_folder none leave out that slit model; --new_label /
+--orig_label rename the methods in the report.
 and reports, on the test split, the AiF PSNR / SSIM / LPIPS, the rendered depth
 AbsRel / RMSE, and the point-cloud Chamfer distance and F-score (tau = 0.005 x bbox
 diagonal). The Chamfer distance is given in % of the GT bounding-box diagonal so
@@ -23,6 +27,8 @@ method). Means use only the scenes where all methods were evaluated.
 Usage (from the repository root):
     python tools/summarize_scenes.py
     python tools/summarize_scenes.py --scenes real_cake real_caps real_cisco
+    # one slit image per pose (cycle), layered PSF: both slit models vs the disk
+    python tools/summarize_scenes.py --suffix _pf_glayer --slit_tag _cyc --out output/scene_summary_cyc
 """
 import argparse
 import csv
@@ -64,8 +70,19 @@ def parse_args():
                    help="model_folder of the slit model with max_angle densification + directional AiF loss")
     p.add_argument("--orig_folder", default="slit_sim", help="model_folder of the original slit model")
     p.add_argument("--disk_folder", default="slit_sim", help="model_folder of the disk model")
+    p.add_argument("--slit_tag", default="",
+                   help="tag of one-image-per-pose slit datasets after the design, e.g. _cyc (--angle_mode cycle)")
+    p.add_argument("--new_label", default=None, help="report label of the --new_folder model")
+    p.add_argument("--orig_label", default=None, help="report label of the --orig_folder model")
     p.add_argument("--out", default="./output/scene_summary")
-    return p.parse_args()
+    a = p.parse_args()
+    if str(a.new_folder).lower() == "none":
+        a.new_folder = None
+    if str(a.orig_folder).lower() == "none":
+        a.orig_folder = None
+    if a.new_folder is None and a.orig_folder is None:
+        p.error("--new_folder none and --orig_folder none leave no slit model")
+    return a
 
 
 def latest_summary(model_path):
@@ -104,15 +121,15 @@ def extract(s):
     )
 
 
-def check_variant(name, cfg, sim_gt):
-    """Warnings if a run does not have the expected settings."""
+def check_variant(name, cfg, sim_gt, kind):
+    """Warnings if a run does not have the expected settings (kind: NEW, ORIG or DISK)."""
     w = []
-    if sim_gt.get("noise_std", 0.0) or sim_gt.get("psf", "gaussian") != "gaussian":
-        w.append(f"{name}: dataset is not noise-free with the Gaussian PSF")
-    if name == NEW and (float(cfg.get("slit_dir_loss", 0.0)) <= 0
+    if sim_gt.get("noise_std", 0.0):
+        w.append(f"{name}: dataset is not noise-free")
+    if kind == NEW and (float(cfg.get("slit_dir_loss", 0.0)) <= 0
                                  or cfg.get("slit_densify_stat", "mean") != "max_angle"):
         w.append(f"{name}: expected slit_dir_loss > 0 and slit_densify_stat max_angle")
-    if name == ORIG and (float(cfg.get("slit_dir_loss", 0.0)) > 0
+    if kind == ORIG and (float(cfg.get("slit_dir_loss", 0.0)) > 0
                                  or cfg.get("slit_densify_stat", "mean") != "mean"):
         w.append(f"{name}: expected slit_dir_loss 0 and slit_densify_stat mean")
     if cfg.get("optics_from_sim_gt", "none") != "none":
@@ -135,21 +152,31 @@ def mean_std(vals):
 
 def main():
     a = parse_args()
-    methods = [(NEW, a.new_folder, "slitsim_{s}_" + a.design + a.suffix),
-               (ORIG, a.orig_folder, "slitsim_{s}_" + a.design + a.suffix),
-               (DISK, a.disk_folder, "disksim_{s}" + a.suffix)]
+    slit_name = "slitsim_{s}_" + a.design + a.slit_tag + a.suffix
+    label = {NEW: a.new_label or NEW, ORIG: a.orig_label or ORIG, DISK: DISK}
+    methods = []                                     # (report label, kind, folder, dataset pattern)
+    if a.new_folder:
+        methods.append((label[NEW], NEW, a.new_folder, slit_name))
+    if a.orig_folder:
+        methods.append((label[ORIG], ORIG, a.orig_folder, slit_name))
+    methods.append((label[DISK], DISK, a.disk_folder, "disksim_{s}" + a.suffix))
     names = [m[0] for m in methods]
+    slits = [m[0] for m in methods if m[1] != DISK]
 
-    data, warnings, missing = {}, [], []
+    data, warnings, missing, sim_info = {}, [], [], {}
     for s in a.scenes:
-        for name, folder, pattern in methods:
+        for name, kind, folder, pattern in methods:
             model_path = os.path.join(a.root, folder, pattern.format(s=s))
             summ = latest_summary(model_path)
             if summ is None:
                 missing.append(f"{s}: {name} ({model_path})")
                 continue
             data[(s, name)] = extract(summ)
-            warnings += [f"{s} {w}" for w in check_variant(name, runtime_config(model_path), summ.get("sim_gt", {}))]
+            gt = summ.get("sim_gt", {})
+            if kind != DISK:
+                sim_info.setdefault("angle_mode", gt.get("angle_mode", "all"))
+            sim_info.setdefault("psf", gt.get("psf", "gaussian"))
+            warnings += [f"{s} {w}" for w in check_variant(name, runtime_config(model_path), gt, kind)]
 
     complete = [s for s in a.scenes if all((s, n) in data for n in names)]
     if not data:
@@ -157,9 +184,13 @@ def main():
 
     lines = [f"# Slit vs equal-area disk over {len(complete)} scene(s)", "",
              f"Scenes with all methods: {', '.join(complete) or 'none'}  ",
-             "Test split; slit n = 4, a = 0.4 (`" + a.design + "`); noise-free, Gaussian PSF; "
+             "Test split; slit design `" + a.design + "`"
+             + {"cycle": " (one image per pose, angle rotating between poses)",
+                "fixed": " (one image per pose, fixed angle)"}.get(sim_info.get("angle_mode"), "")
+             + f"; noise-free, PSF `{sim_info.get('psf', 'gaussian')}`; "
              + ("per-pose focus (`_pf`)" if a.suffix == "_pf"
                 else "global focus (earlier datasets)" if not a.suffix else f"dataset suffix `{a.suffix}`") + ".  ",
+             "Model folders: " + ", ".join(f"{n}: `{f}`" for n, _, f, _ in methods) + ".  ",
              "*Depth RMSE is in scene units (scale dependent); Chamfer is in % of the GT bbox diagonal.", ""]
 
     # ---- mean over the complete scenes ----
@@ -175,7 +206,7 @@ def main():
     lines.append("")
 
     # ---- paired differences and win counts ----
-    pairs = [(NEW, DISK), (ORIG, DISK), (NEW, ORIG)]
+    pairs = [(x, label[DISK]) for x in slits] + ([(slits[0], slits[1])] if len(slits) == 2 else [])
     lines += ["## Paired comparison over scenes", "",
               "Mean difference (first − second) and the number of scenes where the first is better.", "",
               "| comparison | " + " | ".join(h for _, h, _, _ in METRICS) + " |",
@@ -210,13 +241,13 @@ def main():
 
     # ---- PSNR side by side ----
     lines += ["## Test PSNR per scene", "",
-              "| scene | " + " | ".join(names) + " | densmax+L_dir − disk | orig − disk | densmax+L_dir − orig |",
-              "|---" * (len(names) + 4) + "|"]
+              "| scene | " + " | ".join(names) + " | " + " | ".join(f"{x} − {y}" for x, y in pairs) + " |",
+              "|---" * (len(names) + len(pairs) + 1) + "|"]
     for s in a.scenes:
         v = {n: (data.get((s, n)) or {}).get("psnr") for n in names}
         d = lambda x, y: fmt(v[x] - v[y], 2) if v[x] is not None and v[y] is not None else "–"
         lines.append(f"| {s} | " + " | ".join(fmt(v[n], 2) for n in names)
-                     + f" | {d(NEW, DISK)} | {d(ORIG, DISK)} | {d(NEW, ORIG)} |")
+                     + " | " + " | ".join(d(x, y) for x, y in pairs) + " |")
     lines.append("")
 
     if missing:

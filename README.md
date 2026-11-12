@@ -194,6 +194,7 @@ The script also writes `config_files/config_slitsim_real_cake.yaml` and register
 | Option | Meaning |
 |---|---|
 | `--focus_mode` | `per_pose` (default, suffix `_pf`) or `global` (one focus for all poses) |
+| `--angle_mode`, `--fixed_angle` | `all` (default): every pose at all n angles; `cycle`: one image per pose, angle rotating between poses (tag `_cyc`); `fixed`: one image per pose at `--fixed_angle` (tag `_n1_a<a>_fix<deg>`); see [One slit image per pose](#one-slit-image-per-pose-equal-image-count) |
 | `--focus_range lo hi` | inverse-depth quantile range of the per-pose focus (default 0.2 0.8) |
 | `--focus_quantile`, `--focus_depth` | reference focus distance, as a quantile of inverse depth or as an explicit value (the focus of all poses with `--focus_mode global`) |
 | `--theta_bias_deg` | rendered angle = recorded angle + bias, to test learning of the angle offset |
@@ -411,6 +412,32 @@ Per-pose focus (`_pf`), noise-free, Gaussian PSF, n = 4, a = 0.4, test split, me
 - **densmax.** Densmax adds +0.2–0.36 dB over the original slit model (6–8 of 10 scenes) and gives the best point-cloud metrics.
 - **L_dir.** The three densmax variants (L_dir 0, 0.005, 0.03) differ by at most 0.13 dB in PSNR, and their SSIM / LPIPS are the same. That is well within the run-to-run variation. The directional loss therefore has no measurable effect on top of densmax. The default 0.005 keeps a weak loss: it is as good as L_dir 0 in the image metrics and has no strong outlier scene in depth (L_dir 0 and 0.03 each have one).
 - **Scene dependence.** The gain is largest in `real_cisco` (+2.9 to +3.8 dB), the scene with the strongest defocus. Within this scene and `real_daisy`, the gain grows with the blur of the pose. `real_sausage` shows little or no gain although half its pixels are strongly blurred. It has the least image detail of the 10 scenes, and the image detail is the only statistic that correlates significantly with the gain over the scenes (Spearman ρ = 0.64–0.81). The slit keeps detail across its short axis, so it helps only where there is detail to keep.
+
+### One slit image per pose (equal image count)
+
+With all n angles at every pose, the slit records n images per pose and the disk one. `--angle_mode` (`run_design_sweep.py`, simulator) compares the two apertures with **the same number of images and the same exposure per image**:
+
+| Mode | Slit captures | Dataset (example) |
+|---|---|---|
+| `--angle_mode all` (default) | every pose at all n angles | `slitsim_real_cake_n4_a0.40_pf_glayer` |
+| `--angle_mode cycle` | one image per pose; pose i (natural order of the pose names) uses angle i mod n, so the n angles are spread over the poses | `slitsim_real_cake_n4_a0.40_cyc_pf_glayer` |
+| `--angle_mode fixed --fixed_angle 0` | one image per pose, all at 0° (control without directional diversity) | `slitsim_real_cake_n1_a0.40_fix0_pf_glayer` |
+| disk (unchanged) | one image per pose | `disksim_real_cake_pf_glayer` |
+
+All use the same poses, the same per-pose focus and the same aperture area (the slit is 10 × 4 px at the largest defocus as for n4_a0.40). The 3D model is shared by all views, so neighbouring poses with different slit angles can together provide the directional diversity that several angles per pose provide otherwise. The training is unchanged: `F` is shared per focus group (here one image each), densmax groups the images by angle across poses, and the directional loss works per image. The per-pose theory (several angles per pose) does not apply and is not stored. `--no_slit` runs only the disk baseline.
+
+```shell
+for s in real_cake real_caps real_cisco real_coral real_cupcake real_cups real_daisy real_sausage real_seal real_tools; do
+    it=$(ls -d output/model_dofgs/real_results/$s/point_cloud/iteration_* | sed 's/.*iteration_//' | sort -n | tail -1)
+    common="--config config_files/config_$s.yaml --scene $s --iteration $it --gpu 1 --psf gaussian_layered"
+    python tools/run_design_sweep.py $common --angle_mode cycle --no_disk                              # densmax + L_dir
+    python tools/run_design_sweep.py $common --angle_mode cycle --no_disk --dir_loss 0 --densify_stat mean   # original model
+    python tools/run_design_sweep.py $common --no_slit                                                   # disk
+done
+python tools/summarize_scenes.py --suffix _pf_glayer --slit_tag _cyc --out output/scene_summary_cyc
+```
+
+`summarize_scenes.py --slit_tag _cyc` reads the cycle datasets; `--new_folder none` or `--orig_folder none` leaves out one slit model, and `--new_label` / `--orig_label` rename them in the report. `collect_design_sweep.py` lists the angle mode in an "angles" column and leaves the theory columns empty for one-image-per-pose runs.
 
 ---
 
