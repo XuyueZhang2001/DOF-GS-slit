@@ -131,7 +131,7 @@ def same_capture_budget(d, r):
     """True if disk run d is a fair reference for run r (same PSF model, noise setting and total exposure)."""
     if d["psf"] != r["psf"]:
         return False
-    if d.get("focus", "global") != r.get("focus", "global"):   # per-pose vs global focus datasets
+    if d.get("focus", "global") != r.get("focus", "global"):   # per-pose vs (archived) global-focus datasets
         return False
     if d["noise"] != r["noise"]:
         return False

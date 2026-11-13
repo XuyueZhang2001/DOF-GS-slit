@@ -8,10 +8,10 @@ For every source scene it reads the latest evaluation summary
                           (max_angle densification + directional AiF loss)
     slit (orig)           <orig_folder>/slitsim_<scene>_<design><suffix>  default slit_sim (original model)
     disk                  <disk_folder>/disksim_<scene><suffix>           default slit_sim
-<suffix> is _pf for the per-pose-focus datasets (default) and empty for the
-earlier global-focus datasets (--suffix ""); layered-PSF datasets add _glayer
-(--suffix _pf_glayer). --slit_tag adds the tag of one-image-per-pose slit
-datasets after the design (_cyc: --angle_mode cycle, so slitsim_<scene>_n4_a0.40_cyc_pf_glayer).
+<suffix> is empty for the default datasets (per-pose focus, Gaussian PSF) and
+_glayer / _box for the layered PSFs (--suffix _glayer). --slit_tag adds the tag of
+one-image-per-pose slit datasets after the design (_cyc: --angle_mode cycle, so
+slitsim_<scene>_n4_a0.40_cyc_glayer).
 --new_folder none / --orig_folder none leave out that slit model; --new_label /
 --orig_label rename the methods in the report.
 and reports, on the test split, the AiF PSNR / SSIM / LPIPS, the rendered depth
@@ -63,8 +63,8 @@ def parse_args():
     p = argparse.ArgumentParser(description="Slit vs disk summary over several scenes")
     p.add_argument("--scenes", nargs="+", default=REAL_SCENES, help="source scenes (default: the 10 real scenes)")
     p.add_argument("--design", default="n4_a0.40", help="slit design suffix of the dataset names")
-    p.add_argument("--suffix", default="_pf",
-                   help="dataset-name suffix: _pf = per-pose focus (default), '' = earlier global-focus datasets")
+    p.add_argument("--suffix", default="",
+                   help="dataset-name suffix after the design: '' (default) or the PSF tag (_glayer, _box)")
     p.add_argument("--root", default="./output/model_dofgs")
     p.add_argument("--new_folder", "--ours_folder", dest="new_folder", default="slit_sim_dir0.005_densmax",
                    help="model_folder of the slit model with max_angle densification + directional AiF loss")
@@ -188,8 +188,7 @@ def main():
              + {"cycle": " (one image per pose, angle rotating between poses)",
                 "fixed": " (one image per pose, fixed angle)"}.get(sim_info.get("angle_mode"), "")
              + f"; noise-free, PSF `{sim_info.get('psf', 'gaussian')}`; "
-             + ("per-pose focus (`_pf`)" if a.suffix == "_pf"
-                else "global focus (earlier datasets)" if not a.suffix else f"dataset suffix `{a.suffix}`") + ".  ",
+             + "per-pose focus" + (f"; dataset suffix `{a.suffix}`" if a.suffix else "") + ".  ",
              "Model folders: " + ", ".join(f"{n}: `{f}`" for n, _, f, _ in methods) + ".  ",
              "*Depth RMSE is in scene units (scale dependent); Chamfer is in % of the GT bbox diagonal.", ""]
 

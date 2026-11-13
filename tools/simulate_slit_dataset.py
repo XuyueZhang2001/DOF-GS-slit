@@ -80,18 +80,16 @@ defaults (50 mm lens, 40 mm^2 aperture, i.e. a 10 x 4 mm slit at a = 0.4 or a
 measured system. All-in-focus references and test views stay ideal.
 Non-default PSFs add the suffix _box / _glayer (and _diff) to the scene name.
 
-Focus (--focus_mode). per_pose (default): every training pose gets its own
+Focus: every training pose gets its own
 focus distance, as if the camera focused on a random object at each position:
 F_p = 1 / q_p, where q_p is the u_p-quantile of the inverse depths of the
 Gaussians visible in that view and u_p is drawn uniformly from --focus_range
 (default 0.2 .. 0.8). u_p depends only on (source scene, pose name, --seed), so a
 slit and a disk dataset of the same scene get identical focus distances. The
-n slit angles of a pose share its focus. global: one focus distance for all
-poses (the median inverse depth, or --focus_quantile / --focus_depth / the
---match_area reference), as in the earlier datasets. The aperture size K is
-defined at the reference focus in both modes (area at its largest defocus), so
---match_area / --area_px2 mean the same thing as before. Per-pose focus datasets
-get the suffix _pf; they also contain focus_groups.json ({image: pose}), which
+n slit angles of a pose share its focus (DOF-GS likewise learns one focus per
+view). The aperture size K is defined at the reference focus (the median inverse
+depth, or --focus_quantile / --focus_depth / the --match_area reference; area at
+its largest defocus). The datasets also contain focus_groups.json ({image: pose}), which
 the training uses to share one F per focus group (share_F: group) and one K
 over all images (share_K: global).
 
@@ -170,13 +168,12 @@ def parse_args():
     p.add_argument("--group_by_pose", action="store_true",
                    help="generated config trains on all images of one pose per iteration (slit_group_by_pose: true)")
     p.add_argument("--focus_quantile", type=float, default=0.5,
-                   help="focus distance as a quantile of the inverse scene depth (0 = far, 1 = near)")
-    p.add_argument("--focus_depth", type=float, default=None, help="explicit focus distance, overrides --focus_quantile")
-    p.add_argument("--focus_mode", choices=["per_pose", "global"], default="per_pose",
-                   help="per_pose (default): a random focus distance per training pose (suffix _pf); "
-                        "global: one focus distance for all poses (earlier datasets)")
+                   help="reference focus distance (defines the aperture size) as a quantile of the inverse scene "
+                        "depth (0 = far, 1 = near)")
+    p.add_argument("--focus_depth", type=float, default=None,
+                   help="explicit reference focus distance, overrides --focus_quantile")
     p.add_argument("--focus_range", type=float, nargs=2, default=[0.2, 0.8],
-                   help="(per_pose) range of the inverse-depth quantile of the per-pose focus (0 = far, 1 = near)")
+                   help="range of the inverse-depth quantile of the per-pose focus (0 = far, 1 = near)")
     p.add_argument("--theta_bias_deg", type=float, default=0.0,
                    help="systematic offset between rendered and recorded angles (tests theta-offset learning)")
     p.add_argument("--noise_std", type=float, default=0.0,
@@ -424,8 +421,6 @@ def main():
     base += angle_mode_suffix(a.angle_mode, a.fixed_angle) if a.aperture == "slit" else ""
     if a.noise_std > 0 and a.exposure != 1.0:
         base += f"_e{a.exposure:.4g}_{a.noise_scaling}"
-    if a.focus_mode == "per_pose":
-        base += "_pf"                                # per-pose focus
     base += psf_suffix(a.psf, a.diffraction)
     new_scene = a.new_scene or base
 
@@ -528,16 +523,13 @@ def main():
     # focus each pose gets its own focus (shared by its n slit angles).
     focus_of, d_max_pose = {}, []
     for cam in train_cams:
-        if a.focus_mode == "per_pose":
-            iv = visible_inverse_depths(gaussians, [cam], seed=a.seed).float()
-            u = pose_focus_fraction(a.scene, cam.image_name, a.seed, *a.focus_range)
-            Fp = 1.0 / torch.quantile(iv, u).item()
-            q05, q95 = torch.quantile(iv, 0.05).item(), torch.quantile(iv, 0.95).item()
-            d_max_pose.append(max(abs(q95 - 1.0 / Fp), abs(1.0 / Fp - q05)))
-        else:
-            Fp = F
+        iv = visible_inverse_depths(gaussians, [cam], seed=a.seed).float()
+        u = pose_focus_fraction(a.scene, cam.image_name, a.seed, *a.focus_range)
+        Fp = 1.0 / torch.quantile(iv, u).item()
+        q05, q95 = torch.quantile(iv, 0.05).item(), torch.quantile(iv, 0.95).item()
+        d_max_pose.append(max(abs(q95 - 1.0 / Fp), abs(1.0 / Fp - q05)))
         focus_of[cam.image_name] = Fp
-    if a.focus_mode == "per_pose":
+    if focus_of:
         fv = sorted(focus_of.values())
         print(f"Per-pose focus ({len(fv)} poses, inverse-depth quantile {a.focus_range[0]:g}..{a.focus_range[1]:g}): "
               f"F = {fv[0]:.4f} .. {fv[-1]:.4f} (median {fv[len(fv) // 2]:.4f}; reference {F:.4f})")
@@ -686,8 +678,8 @@ def main():
               aperture_area_px2_at_max_defocus=((K_L * K_W if a.aperture == "slit" else math.pi * K_L ** 2 / 4)
                                                 * d_max ** 2),
               d_max=d_max, matched_area_of=a.match_area,
-              focus_mode=a.focus_mode, focus_range=list(a.focus_range),
-              focus_per_group=(focus_of if a.focus_mode == "per_pose" else None),
+              focus_mode="per_pose", focus_range=list(a.focus_range),
+              focus_per_group=focus_of,
               d_max_per_pose_max=(max(d_max_pose) if d_max_pose else d_max),
               max_blur_px_per_pose_max=K_L * (max(d_max_pose) if d_max_pose else d_max),
               ratio_is_optimal=(a.aperture == "slit" and a.optimal_ratio),
@@ -717,8 +709,8 @@ def main():
         for k in [k for k in new_conf.keys() if str(k).startswith("slit_")]:
             new_conf.pop(k)
     new_conf.slit_group_by_pose = bool(a.group_by_pose)
-    # one focus distance per focus group (per pose) or for all images, one aperture scale
-    new_conf.share_F = "group" if a.focus_mode == "per_pose" else "global"
+    # one focus distance per focus group (per pose), one aperture scale
+    new_conf.share_F = "group"
     new_conf.share_K = "global"
     for k in ("slit_share_F", "slit_share_K"):     # legacy flags would override share_F / share_K
         if k in new_conf:

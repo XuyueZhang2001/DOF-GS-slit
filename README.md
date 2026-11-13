@@ -177,26 +177,25 @@ When no slit captures are available, a scene reconstructed by the original DOF-G
 ```shell
 python tools/simulate_slit_dataset.py --config ./config_files/config_real_cake.yaml \
     --scene real_cake --iteration 15000 \
-    --n_angles 4 --max_blur_px 20 --width_ratio 0.1 --focus_mode global
+    --n_angles 4 --max_blur_px 20 --width_ratio 0.1
 ```
 
-This writes `./data/slit_sim/slitsim_real_cake/` (without `--focus_mode global`, `slitsim_real_cake_pf/`, see below), which contains:
+This writes `./data/slit_sim/slitsim_real_cake/`, which contains:
 - `images/`: slit-blurred training views and AIF test views;
 - `aif/`: AIF ground truth of the training poses;
 - `defocus/*.npy`: per-pixel ground-truth blur length in px;
 - `sparse/0/`, `slit_angles.json`, `split.json`, `focus_groups.json` (image → pose);
 - `sim_gt.json`: all ground-truth optics, including the focus of every pose.
 
-**Per-pose focus (default, `--focus_mode per_pose`).** Every training pose focuses at its own depth, as if the camera focused on a random object at each position: `F_p = 1 / q_p`, where `q_p` is the `u_p`-quantile of the inverse depths of the Gaussians visible in that view, and `u_p` is uniform in `--focus_range` (default 0.2–0.8). `u_p` depends only on the source scene, the pose name and `--seed`, so a slit and a disk dataset of the same scene get identical focus distances. The n slit angles of a pose share its focus. The aperture size `K` is still defined at the reference focus (the median inverse depth, or the `--match_area` reference), so the aperture areas are the same as before. With a per-pose focus, the largest blur of a pose can exceed the reference value; the simulator prints the largest one. Datasets get the suffix `_pf`, and their training configs use `share_F: group`, `share_K: global`. `--focus_mode global` reproduces the earlier datasets (one focus for all poses, `share_F: global`). In the evaluation, the defocus bins of the depth errors use the focus of each training pose, and the reference focus for the all-in-focus test poses.
+**Per-pose focus.** Every training pose focuses at its own depth, as if the camera focused on a random object at each position: `F_p = 1 / q_p`, where `q_p` is the `u_p`-quantile of the inverse depths of the Gaussians visible in that view, and `u_p` is uniform in `--focus_range` (default 0.2–0.8). `u_p` depends only on the source scene, the pose name and `--seed`, so a slit and a disk dataset of the same scene get identical focus distances. The n slit angles of a pose share its focus. This matches DOF-GS, which learns one focus distance (and aperture) per view rather than one for all views. The aperture size `K` is defined at the reference focus (the median inverse depth, or the `--match_area` reference). With a per-pose focus, the largest blur of a pose can exceed the reference value; the simulator prints the largest one. The training configs use `share_F: group` (one `F` per pose) and `share_K: global`. The earlier global-focus datasets (one focus for all poses) and the `--focus_mode` option were removed; `tools/migrate_focus_names.py` archives those datasets and renames the per-pose datasets of earlier runs from `*_pf*` to the names without `_pf`. In the evaluation, the defocus bins of the depth errors use the focus of each training pose, and the reference focus for the all-in-focus test poses.
 
 The script also writes `config_files/config_slitsim_real_cake.yaml` and registers the scene. Useful options:
 
 | Option | Meaning |
 |---|---|
-| `--focus_mode` | `per_pose` (default, suffix `_pf`) or `global` (one focus for all poses) |
 | `--angle_mode`, `--fixed_angle` | `all` (default): every pose at all n angles; `cycle`: one image per pose, angle rotating between poses (tag `_cyc`); `fixed`: one image per pose at `--fixed_angle` (tag `_n1_a<a>_fix<deg>`); see [One slit image per pose](#one-slit-image-per-pose-equal-image-count) |
 | `--focus_range lo hi` | inverse-depth quantile range of the per-pose focus (default 0.2 0.8) |
-| `--focus_quantile`, `--focus_depth` | reference focus distance, as a quantile of inverse depth or as an explicit value (the focus of all poses with `--focus_mode global`) |
+| `--focus_quantile`, `--focus_depth` | reference focus distance (defines the aperture size), as a quantile of inverse depth or as an explicit value |
 | `--theta_bias_deg` | rendered angle = recorded angle + bias, to test learning of the angle offset |
 | `--noise_std` | additive Gaussian noise (std on [0, 1] images, at full exposure) on the defocused training captures; default 0 |
 | `--exposure`, `--noise_scaling` | relative exposure time of every capture (default 1) and how the noise grows when it is shorter: `shot` → σ/√e (default), `read` → σ/e |
@@ -364,21 +363,21 @@ This prints the estimated and ground-truth `F`, `K_L`, `K_W`, width ratio and an
 
 ## Multi-scene comparison (slit vs disk)
 
-`tools/run_all_scenes.sh` repeats the real_cake comparison on the 10 real DOF-GS scenes: `real_cake`, `real_caps`, `real_cisco`, `real_coral`, `real_cupcake`, `real_cups`, `real_daisy`, `real_sausage`, `real_seal` and `real_tools`. Each scene needs its data and the authors' pre-trained model in `output/model_dofgs/real_results/<scene>/`. The aperture area is 40 px² at the largest defocus for the reference focus (the median inverse depth). It comes from a reference dataset `slitsim_<scene>` with the original 20 × 2 px slit, simulated with one global focus. The captures use a **per-pose focus** (`_pf`): each pose focuses at a random depth, identical for slit and disk. Training shares one `F` per pose and one `K` over all images. The captures are noise-free, with the Gaussian PSF. Three models are trained per scene:
+`tools/run_all_scenes.sh` repeats the real_cake comparison on the 10 real DOF-GS scenes: `real_cake`, `real_caps`, `real_cisco`, `real_coral`, `real_cupcake`, `real_cups`, `real_daisy`, `real_sausage`, `real_seal` and `real_tools`. Each scene needs its data and the authors' pre-trained model in `output/model_dofgs/real_results/<scene>/`. The aperture area is 40 px² at the largest defocus for the reference focus (the median inverse depth). It comes from a reference dataset `slitsim_<scene>` with the original 20 × 2 px slit, simulated with one global focus. The captures use a **per-pose focus**: each pose focuses at a random depth, identical for slit and disk. Training shares one `F` per pose and one `K` over all images. The captures are noise-free, with the Gaussian PSF. Three models are trained per scene:
 
 | Method | Model |
 |---|---|
-| slit (densmax+L_dir) | n = 4, a = 0.4, `max_angle` densification + directional AiF loss 0.005 (defaults) → `slit_sim_dir0.005_densmax/slitsim_<scene>_n4_a0.40_pf` |
-| slit (orig) | same data, no directional loss, `mean` densification → `slit_sim/slitsim_<scene>_n4_a0.40_pf` |
-| disk | equal-area disk, one capture per pose → `slit_sim/disksim_<scene>_pf` |
+| slit (densmax+L_dir) | n = 4, a = 0.4, `max_angle` densification + directional AiF loss 0.005 (defaults) → `slit_sim_dir0.005_densmax/slitsim_<scene>_n4_a0.40` |
+| slit (orig) | same data, no directional loss, `mean` densification → `slit_sim/slitsim_<scene>_n4_a0.40` |
+| disk | equal-area disk, one capture per pose → `slit_sim/disksim_<scene>` |
 
-`--focus_mode global` (script) and `--suffix ""` (summary) use the earlier global-focus datasets instead. In those runs, the disk learned one `F` and `K` per image and the slit one shared `F` and `K`.
+`--psf gaussian_layered` (script) and `--suffix _glayer` (summary) use the layered-PSF datasets.
 
 ```shell
 bash tools/run_all_scenes.sh --gpu 1 --stage simulate     # datasets; checks that K is representable
 bash tools/run_all_scenes.sh --gpu 1 --stage train        # train + evaluate, then summarise
 bash tools/run_all_scenes.sh --gpu 0 --stage all real_caps real_cisco   # a subset, e.g. on a second GPU
-python tools/summarize_scenes.py                          # summary of whatever is finished (_pf datasets)
+python tools/summarize_scenes.py                          # summary of whatever is finished
 ```
 
 The source model iteration is the latest one in `point_cloud/` (override with `--iteration`). Finished steps are skipped, so the script can be restarted. **K check:** the same area in pixels corresponds to a different `K` in every scene. The model cannot represent `K < 101`. Scenes whose simulation warns about this are not trained, and are listed at the end.
@@ -395,7 +394,7 @@ The Chamfer distance is reported in % of the GT bounding-box diagonal, so that s
 
 ### Results over the 10 real scenes
 
-Per-pose focus (`_pf`), noise-free, Gaussian PSF, n = 4, a = 0.4, test split, mean over the 10 scenes. Each densmax variant is a single run per scene. The `L_dir 0.005` run of `real_cupcake` was repeated (first run 26.02 dB, second 27.33 dB): single runs of a scene can differ by more than 1 dB.
+Per-pose focus, noise-free, Gaussian PSF, n = 4, a = 0.4, test split, mean over the 10 scenes. Each densmax variant is a single run per scene. The `L_dir 0.005` run of `real_cupcake` was repeated (first run 26.02 dB, second 27.33 dB): single runs of a scene can differ by more than 1 dB.
 
 | method | PSNR ↑ | SSIM ↑ | LPIPS ↓ | depth AbsRel ↓ | Chamfer (% diag) ↓ | F@0.005 ↑ |
 |---|---|---|---|---|---|---|
@@ -419,10 +418,10 @@ With all n angles at every pose, the slit records n images per pose and the disk
 
 | Mode | Slit captures | Dataset (example) |
 |---|---|---|
-| `--angle_mode all` (default) | every pose at all n angles | `slitsim_real_cake_n4_a0.40_pf_glayer` |
-| `--angle_mode cycle` | one image per pose; pose i (natural order of the pose names) uses angle i mod n, so the n angles are spread over the poses | `slitsim_real_cake_n4_a0.40_cyc_pf_glayer` |
-| `--angle_mode fixed --fixed_angle 0` | one image per pose, all at 0° (control without directional diversity) | `slitsim_real_cake_n1_a0.40_fix0_pf_glayer` |
-| disk (unchanged) | one image per pose | `disksim_real_cake_pf_glayer` |
+| `--angle_mode all` (default) | every pose at all n angles | `slitsim_real_cake_n4_a0.40_glayer` |
+| `--angle_mode cycle` | one image per pose; pose i (natural order of the pose names) uses angle i mod n, so the n angles are spread over the poses | `slitsim_real_cake_n4_a0.40_cyc_glayer` |
+| `--angle_mode fixed --fixed_angle 0` | one image per pose, all at 0° (control without directional diversity) | `slitsim_real_cake_n1_a0.40_fix0_glayer` |
+| disk (unchanged) | one image per pose | `disksim_real_cake_glayer` |
 
 All use the same poses, the same per-pose focus and the same aperture area (the slit is 10 × 4 px at the largest defocus as for n4_a0.40). The 3D model is shared by all views, so neighbouring poses with different slit angles can together provide the directional diversity that several angles per pose provide otherwise. The training is unchanged: `F` is shared per focus group (here one image each), densmax groups the images by angle across poses, and the directional loss works per image. The per-pose theory (several angles per pose) does not apply and is not stored. `--no_slit` runs only the disk baseline.
 
@@ -434,7 +433,7 @@ for s in real_cake real_caps real_cisco real_coral real_cupcake real_cups real_d
     python tools/run_design_sweep.py $common --angle_mode cycle --no_disk --dir_loss 0 --densify_stat mean   # original model
     python tools/run_design_sweep.py $common --no_slit                                                   # disk
 done
-python tools/summarize_scenes.py --suffix _pf_glayer --slit_tag _cyc --out output/scene_summary_cyc
+python tools/summarize_scenes.py --suffix _glayer --slit_tag _cyc --out output/scene_summary_cyc
 ```
 
 `summarize_scenes.py --slit_tag _cyc` reads the cycle datasets; `--new_folder none` or `--orig_folder none` leaves out one slit model, and `--new_label` / `--orig_label` rename them in the report. `collect_design_sweep.py` lists the angle mode in an "angles" column and leaves the theory columns empty for one-image-per-pose runs.
@@ -697,6 +696,7 @@ tools/
   collect_design_sweep.py    results table and measured-vs-theory plot
   list_runs.py               image, depth and point-cloud metrics of all evaluated runs
   run_all_scenes.sh          slit (densmax+L_dir / original) vs disk on the 10 real DOF-GS scenes
+  migrate_focus_names.py     one-time: archive global-focus datasets, rename *_pf* datasets (dry run by default)
   summarize_scenes.py        per-scene and mean results of that comparison
   diagnose_scenes.py         per-scene statistics (blur, image detail) vs the slit gain
   psf_render.py              layered rendering with box / disk / Gaussian PSFs and diffraction

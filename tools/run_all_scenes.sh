@@ -11,13 +11,13 @@
 #   slit (orig) same data, no directional loss, mean densification
 #                                 -> slit_sim/slitsim_<scene>_n4_a0.40<sfx>
 #   disk        equal-area disk, one capture per pose -> slit_sim/disksim_<scene><sfx>
-# Focus (--focus_mode): per_pose (default, <sfx> = _pf): every pose focuses at its own
-# random depth (shared by its slit angles); training shares one F per pose and one K.
-# global: one focus for all poses (the earlier datasets, <sfx> empty).
-# PSF of the captures (--psf): gaussian (default), gaussian_layered (<sfx> += _glayer)
-# or box (<sfx> += _box). Slit angles (--angle_mode): all (default, n images per pose)
-# or cycle (one image per pose, angle rotating between poses; slit datasets get _cyc
-# after the design, e.g. slitsim_<scene>_n4_a0.40_cyc_pf_glayer; the disk is unchanged).
+# Focus: every pose focuses at its own random depth (shared by its slit angles);
+# training shares one F per pose and one K.
+# PSF of the captures (--psf): gaussian (default, <sfx> empty), gaussian_layered
+# (<sfx> = _glayer) or box (<sfx> = _box). Slit angles (--angle_mode): all (default,
+# n images per pose) or cycle (one image per pose, angle rotating between poses; slit
+# datasets get _cyc after the design, e.g. slitsim_<scene>_n4_a0.40_cyc_glayer; the
+# disk is unchanged).
 # Noise-free. Finished steps are skipped, so the script can be restarted. The source model iteration is the latest one found in
 # output/<model_version>/<model_folder>/<scene>/point_cloud (or --iteration).
 #
@@ -25,7 +25,6 @@
 #   bash tools/run_all_scenes.sh --gpu 1 --stage simulate          # all 10 real scenes, check K first
 #   bash tools/run_all_scenes.sh --gpu 1 --stage train             # then train + evaluate
 #   bash tools/run_all_scenes.sh --gpu 0 --stage all real_caps real_cisco   # a subset on another GPU
-#   bash tools/run_all_scenes.sh --gpu 1 --focus_mode global        # the earlier global-focus setting
 #   bash tools/run_all_scenes.sh --gpu 1 --psf gaussian_layered --angle_mode cycle   # one slit image per pose
 # Stages: simulate (datasets + K check), train (train + evaluate, needs the datasets),
 #         all (both). Scenes whose simulation warns that K cannot be represented
@@ -37,7 +36,6 @@ cd "$(dirname "$0")/.." || exit 1
 GPU=0
 STAGE=all
 ITER=""
-FOCUS=per_pose
 PSF=gaussian
 AMODE=all
 SCENES=()
@@ -46,7 +44,7 @@ while [ $# -gt 0 ]; do
         --gpu) GPU="$2"; shift 2 ;;
         --stage) STAGE="$2"; shift 2 ;;
         --iteration) ITER="$2"; shift 2 ;;
-        --focus_mode) FOCUS="$2"; shift 2 ;;
+        --focus_mode) echo "--focus_mode was removed: every pose has its own focus"; exit 1 ;;
         --psf) PSF="$2"; shift 2 ;;
         --angle_mode) AMODE="$2"; shift 2 ;;
         -h|--help) sed -n '2,34p' "$0"; exit 0 ;;
@@ -54,12 +52,12 @@ while [ $# -gt 0 ]; do
     esac
 done
 case "$STAGE" in simulate|train|all) ;; *) echo "--stage must be simulate, train or all"; exit 1 ;; esac
-case "$FOCUS" in per_pose) SFX=_pf ;; global) SFX="" ;; *) echo "--focus_mode must be per_pose or global"; exit 1 ;; esac
+SFX=""
 case "$PSF" in gaussian) ;; gaussian_layered) SFX="${SFX}_glayer" ;; box) SFX="${SFX}_box" ;;
     *) echo "--psf must be gaussian, gaussian_layered or box"; exit 1 ;; esac
 case "$AMODE" in all) MTAG="" ;; cycle) MTAG="_cyc" ;; *) echo "--angle_mode must be all or cycle"; exit 1 ;; esac
-SWEEP_OPTS=(--focus_mode "$FOCUS" --psf "$PSF" --angle_mode "$AMODE")
-echo "focus mode: $FOCUS, psf: $PSF, angle mode: $AMODE (dataset suffix '${SFX}', slit tag '${MTAG}')"
+SWEEP_OPTS=(--psf "$PSF" --angle_mode "$AMODE")
+echo "psf: $PSF, angle mode: $AMODE (dataset suffix '${SFX}', slit tag '${MTAG}')"
 if [ ${#SCENES[@]} -eq 0 ]; then
     SCENES=(real_cake real_caps real_cisco real_coral real_cupcake real_cups real_daisy real_sausage real_seal real_tools)
 fi
@@ -104,7 +102,7 @@ for s in "${SCENES[@]}"; do
         if [ ! -f "data/slit_sim/slitsim_${s}/sim_gt.json" ]; then
             echo "--- reference dataset slitsim_${s} (20 x 2 px slit)"
             python tools/simulate_slit_dataset.py --config "$cfg" --scene "$s" --iteration "$it" \
-                --n_angles 4 --max_blur_px 20 --width_ratio 0.1 --focus_mode global --new_scene "slitsim_${s}" \
+                --n_angles 4 --max_blur_px 20 --width_ratio 0.1 --new_scene "slitsim_${s}" \
                 2>&1 | tee -a "$LOG_DIR/slitsim_${s}_reference.log"
             if [ "${PIPESTATUS[0]}" -ne 0 ]; then FAILED+=("$s (reference)"); continue; fi
         else

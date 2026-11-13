@@ -66,13 +66,10 @@ Known optics (simulated datasets)
                       model_folder (e.g. slit_sim_optfixed).
 
 Focus of the simulated captures
-  --focus_mode per_pose|global
-                      per_pose (default): every pose focuses at its own random depth
-                      (inverse-depth quantile in --focus_range, default 0.2 0.8); the
-                      n slit angles of a pose share it. Datasets get the suffix _pf and
-                      are trained with one focus distance per pose (share_F: group) and
-                      one aperture scale (share_K: global). global: one focus for all
-                      poses (the earlier datasets, unsuffixed names).
+  --focus_range lo hi every pose focuses at its own random depth (inverse-depth
+                      quantile in [lo, hi], default 0.2 0.8); the n slit angles of a
+                      pose share it. Trained with one focus distance per pose
+                      (share_F: group) and one aperture scale (share_K: global).
 
 Angle mode (slit)
   --angle_mode all|cycle|fixed
@@ -173,11 +170,8 @@ def parse_args():
     p.add_argument("--optics", choices=["none", "init", "fixed"], default="none",
                    help="ground-truth optics (sim_gt.json) for training: none (learned from a depth-based guess), "
                         "init (ground truth as initial value, learned) or fixed (frozen); adds _opt<mode>")
-    p.add_argument("--focus_mode", choices=["per_pose", "global"], default="per_pose",
-                   help="focus of the simulated captures: per_pose (default, a random focus per pose, "
-                        "datasets with suffix _pf) or global (one focus for all poses, the earlier datasets)")
     p.add_argument("--focus_range", type=float, nargs=2, default=[0.2, 0.8],
-                   help="(per_pose) inverse-depth quantile range of the per-pose focus")
+                   help="inverse-depth quantile range of the per-pose focus")
     p.add_argument("--psf", choices=["gaussian", "box", "gaussian_layered"], default="gaussian",
                    help="PSF model of the simulated captures (see tools/simulate_slit_dataset.py); "
                         "slit and disk always use the same model")
@@ -373,10 +367,10 @@ def main():
     ptag = PSF_SUFFIX[a.psf] + ("_diff" if a.diffraction else "")
     psf_args = ["--psf", a.psf] + (["--diffraction"] if a.diffraction else [])
     # focus of the simulated captures (same scene-name suffix as tools/simulate_slit_dataset.py)
-    ftag = "_pf" if a.focus_mode == "per_pose" else ""
-    psf_args += ["--focus_mode", a.focus_mode, "--focus_range", repr(a.focus_range[0]), repr(a.focus_range[1])]
-    print(f"Focus of the simulated captures: {a.focus_mode}"
-          + (f" (inverse-depth quantile {a.focus_range[0]:g}..{a.focus_range[1]:g})" if ftag else ""))
+    ftag = ""                                        # per-pose focus (no name suffix)
+    psf_args += ["--focus_range", repr(a.focus_range[0]), repr(a.focus_range[1])]
+    print(f"Focus of the simulated captures: per pose "
+          f"(inverse-depth quantile {a.focus_range[0]:g}..{a.focus_range[1]:g})")
     if a.psf != "gaussian":
         print(f"PSF model of the simulated captures: {a.psf}" + (" + diffraction" if a.diffraction else ""))
 

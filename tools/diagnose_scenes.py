@@ -53,7 +53,7 @@ def parse_args():
     p = argparse.ArgumentParser(description="Per-scene diagnosis of the slit vs disk gain")
     p.add_argument("--scenes", nargs="+", default=REAL_SCENES)
     p.add_argument("--design", default="n4_a0.40")
-    p.add_argument("--suffix", default="_pf", help="dataset suffix (_pf = per-pose focus, '' = global focus)")
+    p.add_argument("--suffix", default="", help="dataset suffix after the design: '' (default) or the PSF tag (_glayer, _box)")
     p.add_argument("--data_root", default="./data/slit_sim")
     p.add_argument("--root", default="./output/model_dofgs")
     p.add_argument("--new_folder", default="slit_sim_dir0.005_densmax")
